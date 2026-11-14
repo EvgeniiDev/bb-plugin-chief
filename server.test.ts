@@ -32,6 +32,7 @@ async function setup() {
   let sendFailures = 0;
   let getFailures = new Map<string, number>();
   let updateFailures = new Map<string, number>();
+  const missingProjects = new Set<string>();
   const live = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const sent: any[] = [];
   const spawned: any[] = [];
@@ -44,7 +45,10 @@ async function setup() {
         create: async ({ name }: { name: string }) => section = { id: "sec_chief", name, createdAt: 1, updatedAt: 1 },
       },
       projects: {
-        get: async ({ projectId }: { projectId: string }) => ({ id: projectId, name: projectId === "proj_1" ? "Asha" : "Second", kind: "standard" }),
+        get: async ({ projectId }: { projectId: string }) => {
+          if (missingProjects.has(projectId)) throw new Error("HTTP 404: Project not found");
+          return { id: projectId, name: projectId === "proj_1" ? "Asha" : "Second", kind: "standard" };
+        },
         fileContent: async () => { throw new Error("missing"); },
       },
       hosts: { list: async () => [{ id: "host_1", name: "Local", status: "connected" }] },
@@ -115,6 +119,7 @@ async function setup() {
     sent,
     live,
     section: () => section,
+    markProjectMissing(projectId: string) { missingProjects.add(projectId); },
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
@@ -458,6 +463,25 @@ describe("Chief backend", () => {
     // An explicit start is the operator's way back in: it clears the pause.
     await start(state, "proj_1");
     expect(state.spawned).toHaveLength(7);
+  });
+
+  test("does not restart a Chief for a project that no longer exists", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const state = await setup();
+    await start(state);
+    const chief = (await status(state)).threads.find((row) => row.role === "chief")!;
+    state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, status: "error" });
+    await state.supervisorCycle();
+    expect(state.spawned).toHaveLength(2);
+
+    state.markProjectMissing("proj_1");
+    const failed = (await status(state)).threads.filter((row) => row.role === "chief").at(-1)!;
+    state.live.set(failed.threadId, { ...state.live.get(failed.threadId)!, status: "error" });
+    await state.supervisorCycle();
+    vi.setSystemTime(new Date(Date.now() + 120_000));
+    await state.supervisorCycle();
+    await state.supervisorCycle();
+    expect(state.spawned).toHaveLength(2);
   });
 
   test("imports only public SDK surfaces", async () => {

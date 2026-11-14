@@ -456,6 +456,16 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** A project that was deleted cannot host a Chief; starting one there would only fail. */
+  async function projectExists(projectId: string) {
+    try {
+      await bb.sdk.projects.get({ projectId });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Supervisor-side Chief start. Unlike an explicit `bb chief start`, it is skipped while a previous
    * start is still cooling down, and stops entirely after repeated failures, so a permanent failure
@@ -480,6 +490,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (state && Date.now() < state.retryAt) return;
     const latest = latestChiefForProject.get(projectId) as ManagedRow | undefined;
     if (latest && !TERMINAL_CHIEF_STATES.has(latest.state)) return;
+    if (!(await projectExists(projectId))) return;
     try {
       const result = await ensureChief(projectId);
       if (result.created) {
