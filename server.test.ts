@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import {
   createFakePluginHost,
@@ -11,6 +11,7 @@ import plugin from "./server";
 
 const disposals: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  vi.useRealTimers();
   while (disposals.length) await disposals.pop()!();
 });
 
@@ -403,6 +404,52 @@ describe("Chief backend", () => {
     const service = state.harness.behavior.runService("supervisor");
     service.controller.abort();
     await expect(service.done).resolves.toBeUndefined();
+  });
+
+  test("backs off and then pauses automatic Chief restarts after repeated start failures", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const state = await setup();
+    await start(state);
+    expect(state.spawned).toHaveLength(1);
+
+    async function failLatestChief() {
+      const row = (await status(state)).threads.filter((entry) => entry.role === "chief").at(-1)!;
+      state.live.set(row.threadId, { ...state.live.get(row.threadId)!, status: "error" });
+      await state.supervisorCycle();
+    }
+    function advance(ms: number) {
+      vi.setSystemTime(new Date(Date.now() + ms));
+    }
+
+    // The first failed Chief is replaced immediately, then the backoff holds the next attempt.
+    await failLatestChief();
+    expect(state.spawned).toHaveLength(2);
+    await failLatestChief();
+    expect(state.spawned).toHaveLength(2);
+    advance(59_000);
+    await state.supervisorCycle();
+    expect(state.spawned).toHaveLength(2);
+
+    // Each persisted failure doubles the delay: 60s, 120s, 240s, 480s.
+    for (const [index, delay] of [60_000, 120_000, 240_000, 480_000].entries()) {
+      advance(delay);
+      await state.supervisorCycle();
+      expect(state.spawned).toHaveLength(3 + index);
+      await failLatestChief();
+    }
+
+    // The fifth consecutive failure pauses automatic starts for good.
+    expect(state.spawned).toHaveLength(6);
+    advance(24 * 60 * 60_000);
+    await state.supervisorCycle();
+    await state.supervisorCycle();
+    expect(state.spawned).toHaveLength(6);
+    const reported = JSON.parse((await state.harness.behavior.runCli(["status", "--project", "proj_1", "--json"])).stdout!);
+    expect(reported.restart).toMatchObject({ paused: true, failures: 5 });
+
+    // An explicit start is the operator's way back in: it clears the pause.
+    await start(state, "proj_1");
+    expect(state.spawned).toHaveLength(7);
   });
 
   test("imports only public SDK surfaces", async () => {
