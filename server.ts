@@ -171,6 +171,10 @@ function clip(value: string, limit = MAX_ALERT_LENGTH) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 }
 
+function isMissingThreadError(error: unknown) {
+  return error instanceof Error && /\b404\b|not found/i.test(error.message);
+}
+
 function bullets(values?: string[]) {
   return values?.length ? values.map((value) => `- ${value}`).join("\n") : "- None stated.";
 }
@@ -720,6 +724,11 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       thread = await bb.sdk.threads.get({ threadId: row.thread_id });
     } catch (error) {
+      if (isMissingThreadError(error)) {
+        db.prepare(`UPDATE managed_threads SET state='deleted', status=NULL, active_since=NULL, updated_at=? WHERE thread_id=?`).run(Date.now(), row.thread_id);
+        reloadRoles();
+        return true;
+      }
       bb.log.warn(`Transient thread read failure for ${row.thread_id}; will retry: ${String(error)}`);
       return false;
     }

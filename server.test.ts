@@ -291,6 +291,14 @@ describe("Chief backend", () => {
     expect(state.live.get(worker.threadId)).toMatchObject({ sectionId: "sec_chief", visibility: "visible" });
   });
 
+  test("marks a managed thread that no longer exists as deleted instead of retrying forever", async () => {
+    const state = await setup();
+    const worker = await delegate(state, (await start(state)).threadId);
+    state.live.delete(worker.threadId);
+    await state.supervisorCycle();
+    expect((await status(state)).threads.find((row) => row.threadId === worker.threadId)?.state).toBe("deleted");
+  });
+
   test("persists failed notifications and retries them before reporting delivery", async () => {
     const state = await setup();
     const chief = await start(state);
